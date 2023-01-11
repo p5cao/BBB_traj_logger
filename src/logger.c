@@ -1,30 +1,14 @@
-#include <stdio.h>
-// #include <math.h>
-// #include <rc/math/filter.h>
-// #include <rc/math/kalman.h>
-// #include <rc/math/quaternion.h>
-// #include <rc/math/other.h>
-// #include <rc/start_stop.h>
-// #include <rc/led.h>
-// #include <rc/mpu.h>
-// #include <rc/servo.h>
-// #include <rc/adc.h>
-// #include <rc/time.h>
-// #include <rc/bmp.h>
-
-#include <getopt.h>
-#include <signal.h>
-#include <stdlib.h> // for atoi() and exit()
-#include <rc/mpu.h>
-#include <rc/time.h>
-
-//#include <imu_reader.h>
-#include <feedback.h>
-
 /**
  * @file logger.c
  *
+ * Author: Pengcheng Cao
  */
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <errno.h>
+#include <dirent.h>
+#include <string.h>
 
 #include <stdio.h>
 #include <math.h>
@@ -39,6 +23,7 @@
 #include <rc/adc.h>
 #include <rc/time.h>
 #include <rc/bmp.h>
+#include <rc/pthread.h>
 #include <getopt.h>
 #include <signal.h>
 #include <stdlib.h> // for atoi() and exit()
@@ -55,6 +40,8 @@
 uav_state_t fstate; // extern variable in feedback.h
 
 
+
+
 // altitude kalman filer elements
 //static rc_filter_t D_roll, D_pitch, D_yaw, D_batt, D_altitude
 static rc_filter_t D_batt, altitude_lp;
@@ -64,14 +51,15 @@ static rc_vector_t u,y;
 static rc_filter_t acc_lp;
 
 // local functions
-static void __feedback_isr(void);
+//static void __feedback_isr(void);
 static double __batt_voltage();
-static int __estimate_altitude();
+//static int __estimate_altitude();
 static int __feedback_state_estimate();
 
-log_entry_t new_log;
+// array of two buffers so one can fill while writing the other to file
+log_entry_t buffer[2][BUF_LEN];
 
-
+int logging_enabled = 1;
 
 static rc_bmp_data_t bmp_data;
 
@@ -85,7 +73,7 @@ static double __batt_voltage()
 	return tmp;
 }
 
-int __init_altitude_kf()
+static int __init_altitude_kf()
 {
 //initialize altitude kalman filter and bmp sensor
 	F = rc_matrix_empty();
@@ -209,53 +197,199 @@ static int __feedback_state_estimate()
 }
 
 
-static int __estimate_altitude()
+// int __estimate_altitude()
+// {
+// 	int i;
+// 	double accel_vec[3];
+// 	static int bmp_sample_counter = 0;
+
+// 	// check if we need to sample BMP this loop
+// 	if(bmp_sample_counter>=BMP_RATE_DIV){
+// 		// perform the i2c reads to the sensor, on bad read just try later
+// 		if(rc_bmp_read(&bmp_data)) return -1;
+// 		bmp_sample_counter=0;
+// 	}
+// 	bmp_sample_counter++;
+
+// 	// make copy of acceleration reading before rotating
+// 	for(i=0;i<3;i++) accel_vec[i]= data.accel[i];
+// 	// rotate accel vector
+// 	rc_quaternion_rotate_vector_array(accel_vec,data.dmp_quat);
+
+// 	// do first-run filter setup
+// 	if(kf.step==0){
+// 		kf.x_est.d[0] = bmp_data.alt_m;
+// 		rc_filter_prefill_inputs(&acc_lp, accel_vec[2]-9.80665);
+// 		rc_filter_prefill_outputs(&acc_lp, accel_vec[2]-9.80665);
+// 	}
+
+// 	// calculate acceleration and smooth it just a tad
+// 	rc_filter_march(&acc_lp, accel_vec[2]-9.80665);
+// 	u.d[0] = acc_lp.newest_output;
+
+// 	// don't bother filtering Barometer, kalman will deal with that
+// 	y.d[0] = bmp_data.alt_m;
+// 	rc_kalman_update_lin(&kf, u, y);
+
+// 	// altitude estimate
+// 	fstate.altitude_bmp = rc_filter_march(&altitude_lp,bmp_data.alt_m);
+// 	fstate.altitude_kf = kf.x_est.d[0];
+// 	fstate.alt_kf_vel = kf.x_est.d[1];
+// 	fstate.alt_kf_accel = kf.x_est.d[2];
+
+// 	return 0;
+// }
+
+// void __feedback_isr(void)
+// {
+// 	//setpoint_manager_update();
+// 	__feedback_state_estimate();
+// 	__estimate_altitude();
+// 	//__feedback_control();
+// }
+
+int log_manager_init()
 {
 	int i;
-	double accel_vec[3];
-	static int bmp_sample_counter = 0;
+	char path[100];
+	struct stat st = {0};
 
-	// check if we need to sample BMP this loop
-	if(bmp_sample_counter>=BMP_RATE_DIV){
-		// perform the i2c reads to the sensor, on bad read just try later
-		if(rc_bmp_read(&bmp_data)) return -1;
-		bmp_sample_counter=0;
-	}
-	bmp_sample_counter++;
-
-	// make copy of acceleration reading before rotating
-	for(i=0;i<3;i++) accel_vec[i]= data.accel[i];
-	// rotate accel vector
-	rc_quaternion_rotate_vector_array(accel_vec,data.dmp_quat);
-
-	// do first-run filter setup
-	if(kf.step==0){
-		kf.x_est.d[0] = bmp_data.alt_m;
-		rc_filter_prefill_inputs(&acc_lp, accel_vec[2]-9.80665);
-		rc_filter_prefill_outputs(&acc_lp, accel_vec[2]-9.80665);
+	// if the thread if running, stop before starting a new log file
+	if(logging_enabled){
+		//fprintf(stderr,"ERROR: in start_log_manager, log manager already running.\n");
+		//return -1;
+		log_manager_cleanup();
 	}
 
-	// calculate acceleration and smooth it just a tad
-	rc_filter_march(&acc_lp, accel_vec[2]-9.80665);
-	u.d[0] = acc_lp.newest_output;
+	// first make sure the directory exists, make it if not
+	if (stat(LOG_DIR, &st) == -1) {
+		mkdir(LOG_DIR, 0755);
+	}
 
-	// don't bother filtering Barometer, kalman will deal with that
-	y.d[0] = bmp_data.alt_m;
-	rc_kalman_update_lin(&kf, u, y);
+	// search for existing log files to determine the next number in the series
+	for(i=1;i<=MAX_LOG_FILES+1;i++){
+		memset(&path, 0, sizeof(path));
+		sprintf(path, LOG_DIR "%d.csv", i);
+		// if file exists, move onto the next index
+		if(stat(path, &st)==0) continue;
+		else break;
+	}
+	// limit number of log files
+	if(i==MAX_LOG_FILES+1){
+		printf("ERROR: log file limit exceeded\n");
+		printf("delete old log files before continuing\n");
+		return -1;
+	}
+	// create and open new file for writing
+	fd = fopen(path, "w+");
+	if(fd == 0) {
+		printf("ERROR: can't open log file for writing\n");
+		return -1;
+	}
+	// write header
+	#define X(type, fmt, name) fprintf(fd, "%s," , #name);
+	LOG_TABLE
+	#undef X
+	fprintf(fd, "\n");
+	fflush(fd);
 
-	// altitude estimate
-	fstate.altitude_bmp = rc_filter_march(&altitude_lp,bmp_data.alt_m);
-	fstate.altitude_kf = kf.x_est.d[0];
-	fstate.alt_kf_vel = kf.x_est.d[1];
-	fstate.alt_kf_accel = kf.x_est.d[2];
+	// start thread
+	logging_enabled = 1;
+	num_entries = 0;
+	buffer_pos = 0;
+	current_buf = 0;
+	needs_writing = 0;
 
+	// start logging thread
+	if(rc_pthread_create(&pthread, __log_manager_func, NULL, SCHED_FIFO, LOG_MANAGER_PRI)<0){
+		fprintf(stderr,"ERROR in start_log_manager, failed to start thread\n");
+		return -1;
+	}
+	rc_usleep(1000);
 	return 0;
 }
 
-static void __feedback_isr(void)
+int log_manager_cleanup()
 {
-	//setpoint_manager_update();
-	__feedback_state_estimate();
-	__estimate_altitude();
-	//__feedback_control();
+	// just return if not logging
+	if(logging_enabled==0) return 0;
+
+	// disable logging so the thread can stop and start multiple times
+	// thread also exits on rc_get_state()==EXITING
+	logging_enabled=0;
+	int ret = rc_pthread_timed_join(pthread,NULL,LOG_MANAGER_TOUT);
+	if(ret==1) fprintf(stderr,"WARNING: log_manager_thread exit timeout\n");
+	else if(ret==-1) fprintf(stderr,"ERROR: failed to join log_manager thread\n");
+	return ret;
+}
+
+void* __log_manager_func(__attribute__ ((unused)) void* ptr)
+{
+	int i, buf_to_write;
+	// while logging enabled and not exiting, write full buffers to disk
+	while(rc_get_state()!=EXITING && logging_enabled){
+		if(needs_writing){
+			// buffer to be written is opposite of one currently being filled
+			if(current_buf==0) buf_to_write=1;
+			else buf_to_write=0;
+			// write the full buffer to disk;
+			for(i=0;i<BUF_LEN;i++){
+				__write_log_entry(buffer[buf_to_write][i]);
+			}
+			fflush(fd);
+			needs_writing = 0;
+		}
+		rc_usleep(1000000/LOG_MANAGER_HZ);
+	}
+
+	// if program is exiting or logging got disabled, write out the rest of
+	// the logs that are in the buffer current being filled
+	//printf("writing out remaining log file\n");
+	for(i=0;i<buffer_pos;i++){
+		__write_log_entry(buffer[current_buf][i]);
+	}
+	fflush(fd);
+	fclose(fd);
+	//printf("log file closed\n");
+	// zero out state
+	logging_enabled = 0;
+	num_entries = 0;
+	buffer_pos = 0;
+	current_buf = 0;
+	needs_writing = 0;
+	return NULL;
+}
+
+int __write_log_entry(log_entry_t entry)
+{
+	#define X(type, fmt, name) fprintf(fd, fmt "," , entry.name);
+	LOG_TABLE
+	#undef X
+	fprintf(fd, "\n");
+	return 0;
+}
+
+int add_log_entry(log_entry_t new)
+{
+	if(!logging_enabled){
+		fprintf(stderr,"ERROR: trying to log entry while logger isn't running\n");
+		return -1;
+	}
+	if(needs_writing && buffer_pos >= BUF_LEN){
+		fprintf(stderr,"WARNING: logging buffer full, skipping log entry\n");
+		return -1;
+	}
+	// add to buffer and increment counters
+	buffer[current_buf][buffer_pos] = new;
+	buffer_pos++;
+	num_entries++;
+	// check if we've filled a buffer
+	if(buffer_pos >= BUF_LEN){
+		buffer_pos = 0;		// reset buffer position to 0
+		needs_writing = 1;	// flag the writer to dump to disk
+		// swap buffers
+		if(current_buf==0) current_buf=1;
+		else current_buf=0;
+	}
+	return 0;
 }

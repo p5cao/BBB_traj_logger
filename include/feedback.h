@@ -48,12 +48,13 @@ typedef struct uav_state_t{
 
     double x; ///< current x position (m)
     double x_vel;  ///< current x velocity component (m/s)
+    double x_accel;  ///< current x accel component in body frame(m/s)
     double y; ///< current x position (m)
     double y_vel;  ///< current x velocity component (m/s)
-    
+    double y_accel;  ///< current y accel component in body frame(m/s)
     double z; ///< current x position (m)
     double z_vel;  ///< current x velocity component (m/s)
-    
+    double z_accel;  ///< current z accel component (m/s)
 } uav_state_t;
 
 extern uav_state_t fstate;
@@ -64,6 +65,23 @@ int num_yaw_spins;
 double last_yaw;
 double tmp;
 int last_en_alt_ctrl;
+
+
+#define MAX_LOG_FILES	500
+#define BUF_LEN		50
+
+uint64_t num_entries;	// number of entries logged so far
+int buffer_pos;		// position in current buffer
+int current_buf;	// 0 or 1 to indicate which buffer is being filled
+int needs_writing;	// flag set to 1 if a buffer is full
+FILE* fd;		// file descriptor for the log file
+
+// array of two buffers so one can fill while writing the other to file
+
+
+// background thread and running flag
+pthread_t pthread;
+
 /**
  * @brief      Initial setup of all feedback controllers. Should only be called
  *             once on program start.
@@ -97,10 +115,11 @@ int feedback_arm();
 
 int feedback_cleanup();
 
+// int log_manager_init();
 
+// int log_manager_cleanup();
 
-
-
+void __feedback_isr(void);
 
 #endif // FEEDBACK_H
 

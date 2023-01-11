@@ -57,7 +57,9 @@
 typedef struct log_entry_t { LOG_TABLE } log_entry_t;
 #undef X
 
-
+#define LOG_MANAGER_TOUT	2.0
+#define LOG_MANAGER_PRI		50
+#define LOG_MANAGER_HZ		20
 /**
  * @brief      creates a new csv log file and starts the background thread.
  *
@@ -97,5 +99,16 @@ int add_log_entry(log_entry_t new_entry);
  * @return     0 on sucess and clean exit, -1 on exit timeout/force close.
  */
 int log_manager_cleanup();
+
+
+void* __log_manager_func(__attribute__ ((unused)) void* ptr);
+
+int __write_log_entry(log_entry_t entry);
+
+int add_log_entry(log_entry_t new);
+
+
+
+
 
 #endif // LOG_MANAGER_H
