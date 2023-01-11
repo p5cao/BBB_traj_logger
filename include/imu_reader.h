@@ -50,7 +50,8 @@ rc_mpu_data_t data;
 
 static void __transform(void);
 static int __estimate_altitude();
-static int __kalman_filtering();
+static int __complement_filtering();
+static int __integrate();
 
 void __print_usage(void);
 void __print_data(void);

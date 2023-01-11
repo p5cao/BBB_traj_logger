@@ -35,8 +35,7 @@
 #include <getopt.h>
 #include <signal.h>
 #include <stdlib.h> // for atoi() and exit()
-#include <rc/mpu.h>
-#include <rc/time.h>
+#include <sys/time.h>
 
 #include <imu_reader.h>
 #include <feedback.h>
@@ -72,7 +71,7 @@ int accel_transformed = 0;
 #define OVERSAMPLE  BMP_OVERSAMPLE_16
 #define INTERNAL_FILTER BMP_FILTER_OFF
 
-
+#define TIME_CONSTANT   2.0
 
 //static rc_mpu_data_t mpu_data;
 static rc_bmp_data_t bmp_data;
@@ -87,6 +86,14 @@ static rc_filter_t acc_lp = RC_FILTER_INITIALIZER;
 static rc_filter_t x_acc_lp = RC_FILTER_INITIALIZER;
 static rc_filter_t y_acc_lp = RC_FILTER_INITIALIZER;
 
+static rc_filter_t acc_hp = RC_FILTER_INITIALIZER;
+static rc_filter_t x_acc_hp = RC_FILTER_INITIALIZER;
+static rc_filter_t y_acc_hp = RC_FILTER_INITIALIZER;
+
+static rc_filter_t integrator = RC_FILTER_INITIALIZER;
+static rc_filter_t double_integrator = RC_FILTER_INITIALIZER;
+
+static struct timeval now;
 
 // static int est_kf;
 // // altitude kalman filer elements
@@ -163,7 +170,7 @@ static void __transform(void)
 	
 	//dt = 1.0/settings.feedback_hz;
 	
-	//rc_mpu_config_t mpu_conf;
+// 	//rc_mpu_config_t mpu_conf;
         rc_matrix_t F = RC_MATRIX_INITIALIZER;
         rc_matrix_t G = RC_MATRIX_INITIALIZER;
         rc_matrix_t H = RC_MATRIX_INITIALIZER;
@@ -182,13 +189,16 @@ static void __transform(void)
         // define system -DT; // accel bias
         F.d[0][0] = 1.0;
         F.d[0][1] = DT;
-        F.d[0][2] = 0.0;
+        //F.d[0][2] = 0.0;
+        F.d[0][2] = 0.5*DT*DT;
         F.d[1][0] = 0.0;
         F.d[1][1] = 1.0;
-        F.d[1][2] = -DT; // subtract accel bias
+        F.d[1][2] = DT; // subtract accel bias
         F.d[2][0] = 0.0;
         F.d[2][1] = 0.0;
         F.d[2][2] = 1.0; // accel bias state
+        
+        
         G.d[0][0] = 0.5*DT*DT;
         G.d[0][1] = DT;
         G.d[0][2] = 0.0;
@@ -214,134 +224,64 @@ static void __transform(void)
         if(rc_kalman_alloc_lin(&kf,F,G,H,Q,R,Pi)==-1) return ;
         // initialize the little LP filter to take out accel noise
         if(rc_filter_first_order_lowpass(&acc_lp, DT, ACCEL_LP_TC)) return;
-
-         // init barometer and read in first data
-        //printf("initializing barometer\n");
-        // if(rc_bmp_init(BMP_OVERSAMPLE_16, BMP_FILTER_16)) return;
-        // if(rc_bmp_read(&bmp_data)) return;
-
-        
-        // // filtering x coordinates
-        // if(kf_x.step==0){
-        //         kf_x.x_est.d[0] = 0.0;
-        //         rc_filter_prefill_inputs(&acc_lp_x, accel[0]);
-        //         rc_filter_prefill_outputs(&acc_lp_x, accel[0]);
-        // }
-        // // calculate acceleration and smooth it just a tad
-        // rc_filter_march(&acc_lp_x, accel[0]);
-        // u.d[2] = acc_lp_x.newest_output;
-        // // // // don't bother filtering Barometer, kalman will deal with that
-        // y.d[0] = 0.0;
-        // if(rc_kalman_update_lin(&kf_x, u, y)) running=0;
-        
-        // fstate.x = kf_x.x_est.d[0];
-        // fstate.x_vel = kf_x.x_est.d[1];
         fstate.x_accel = accel[0];
         fstate.y_accel = accel[1];
         fstate.z_accel = accel[2];
 
-        //  // filtering y coordinates
-        // if(kf_y.step==0){
-        //         kf_y.x_est.d[0] = 0.0;
-        //         rc_filter_prefill_inputs(&acc_lp_y, accel[1]);
-        //         rc_filter_prefill_outputs(&acc_lp_y, accel[1]);
-        // }
-        // // calculate acceleration and smooth it just a tad
-        // rc_filter_march(&acc_lp_y, accel[1]);
-        // // u.d[0] = acc_lp.newest_output;
-        // // // don't bother filtering Barometer, kalman will deal with that
-        // // y.d[0] = bmp_data.alt_m;
-        
-        // fstate.y = kf_y.x_est.d[0];
-        // fstate.y_vel = kf_y.x_est.d[1];
-        // fstate.y_accel = kf_y.x_est.d[2];
-        
-        static int bmp_sample_counter = 0;
-        // filtering z coordinates
-        // if(kf.step==0){
-        //         kf.x_est.d[0] = bmp_data.alt_m;
-        //         rc_filter_prefill_inputs(&acc_lp, accel[2]-9.80665);
-        //         rc_filter_prefill_outputs(&acc_lp, accel[2]-9.80665);
-        // }
-        // // calculate acceleration and smooth it just a tad
-        // rc_filter_march(&acc_lp, accel[2]-9.80665);
-        // u.d[0] = acc_lp.newest_output;
-        // // don't bother filtering Barometer, kalman will deal with that
-        // y.d[0] = bmp_data.alt_m;
-        // if(rc_kalman_update_lin(&kf, u, y)) running=0;
-
-        // fstate.z_accel = kf.x_est.d[2]+9.80665;
-        // fstate.z_vel = kf.x_est.d[1];
-        // fstate.z = kf.x_est.d[0];
-        
-	//fflush(stdout);
-	// do first-run filter setup
-// 	if(kf.step==0){
-// 		kf.x_est.d[0] = bmp_data.alt_m;
-// 		rc_filter_prefill_inputs(&acc_lp, accel[2]-9.80665);
-// 		rc_filter_prefill_outputs(&acc_lp, accel[2]-9.80665);
-// 	}
-
-// 	// calculate acceleration and smooth it just a tad
-// 	rc_filter_march(&acc_lp, accel[2]-9.80665);
-// 	u.d[0] = acc_lp.newest_output;
-
-// 	// don't bother filtering Barometer, kalman will deal with that
-// 	y.d[0] = bmp_data.alt_m;
-// 	if (rc_kalman_update_lin(&kf, u, y)) running = 0;
-
-// 	// altitude estimate
-// 	//fstate.altitude_bmp = rc_filter_march(&altitude_lp,bmp_data.alt_m);
-	
-//         //now check if we need to sample BMP this loop
-//         bmp_sample_counter++;
-//         if(bmp_sample_counter>=BMP_RATE_DIV){
-//                 // perform the i2c reads to the sensor, on bad read just try later
-//                 if(rc_bmp_read(&bmp_data)) return;
-//                 bmp_sample_counter=0;
-//         }
-// 	//fstate.altitude_kf = kf.x_est.d[0];
-//         fstate.altitude_kf = kf.x_est.d[0];
-// 	fstate.alt_kf_vel = kf.x_est.d[1];
-// 	fstate.alt_kf_accel = kf.x_est.d[2];
-	
-        
 	return;
 }
 
 
-static int __Kalman_filtering(){
+static int __complement_filtering(){
         int i;
+        double x_lp, x_hp, y_lp, y_hp, z_lp, z_hp;
 	double accel_vec[3];
 	double x_accel_filtered;
 	double y_accel_filtered;
+	double z_accel_filtered;
 	//double z_accel_filtered;
 	accel_vec[0] = fstate.x_accel;
 	accel_vec[1] = fstate.y_accel;
 	accel_vec[2] = fstate.z_accel;
         // do first-run filter setup
         if(rc_filter_first_order_lowpass(&acc_lp, DT, ACCEL_LP_TC)) return 0;
+        if(rc_filter_first_order_highpass(&acc_hp, DT, ACCEL_LP_TC)) return 0;
         if(rc_filter_first_order_lowpass(&x_acc_lp, DT, ACCEL_LP_TC)) return 0;
+        if(rc_filter_first_order_highpass(&x_acc_hp, DT, ACCEL_LP_TC)) return 0;
         if(rc_filter_first_order_lowpass(&y_acc_lp, DT, ACCEL_LP_TC)) return 0;
+        if(rc_filter_first_order_highpass(&y_acc_hp, DT, ACCEL_LP_TC)) return 0;
 	if(kf.step==0){
 		kf.x_est.d[0] = bmp_data.alt_m;
 		rc_filter_prefill_inputs(&acc_lp, accel_vec[2]-9.80665);
 		rc_filter_prefill_outputs(&acc_lp, accel_vec[2]-9.80665);
+		rc_filter_prefill_inputs(&acc_hp, accel_vec[2]-9.80665);
+		rc_filter_prefill_outputs(&acc_hp, accel_vec[2]-9.80665);
 		rc_filter_prefill_inputs(&x_acc_lp, accel_vec[0]);
 		rc_filter_prefill_outputs(&x_acc_lp, accel_vec[0]);
+		rc_filter_prefill_inputs(&x_acc_hp, accel_vec[0]);
+		rc_filter_prefill_outputs(&x_acc_hp, accel_vec[0]);
 		rc_filter_prefill_inputs(&y_acc_lp, accel_vec[1]);
 		rc_filter_prefill_outputs(&y_acc_lp, accel_vec[1]);
+		rc_filter_prefill_inputs(&y_acc_hp, accel_vec[1]);
+		rc_filter_prefill_outputs(&y_acc_hp, accel_vec[1]);
 	}
 	
-	// calculate acceleration and smooth it just a tad
-	rc_filter_march(&x_acc_lp, accel_vec[0]);
-	rc_filter_march(&y_acc_lp, accel_vec[1]);
-	rc_filter_march(&acc_lp, accel_vec[2]-9.80665);
-	u.d[0] = acc_lp.newest_output;
-	x_accel_filtered = x_acc_lp.newest_output;
-	y_accel_filtered = y_acc_lp.newest_output;
 
+	
+	// calculate acceleration and smooth it just a tad
+	x_lp = rc_filter_march(&x_acc_lp, accel_vec[0]);
+	x_hp = rc_filter_march(&x_acc_hp, accel_vec[0]);
+	y_lp = rc_filter_march(&y_acc_lp, accel_vec[1]);
+	y_hp = rc_filter_march(&y_acc_hp, accel_vec[1]);
+	z_lp = rc_filter_march(&acc_lp, accel_vec[2]-9.80665);
+	z_hp = rc_filter_march(&acc_hp, accel_vec[2]-9.80665);
+	u.d[0] = acc_lp.newest_output;
+// 	x_accel_filtered = x_acc_lp.newest_output;
+	x_accel_filtered = x_lp + x_hp;
+// 	y_accel_filtered = y_acc_lp.newest_output;
+        y_accel_filtered = y_lp + y_hp;
 	// don't bother filtering Barometer, kalman will deal with that
+	z_accel_filtered = z_lp + z_hp;
 //y.d[0] = bmp_data.alt_m;
         y.d[0] = 0.0;
 	rc_kalman_update_lin(&kf, u, y);
@@ -352,12 +292,107 @@ static int __Kalman_filtering(){
 // 	fstate.alt_kf_vel = kf.x_est.d[1];
 // 	fstate.alt_kf_accel = kf.x_est.d[2];
 	// x, y accel estimate
-	fstate.x_accel = x_accel_filtered;
-	fstate.y_accel = y_accel_filtered;
+        fstate.x_accel = x_accel_filtered;
+        fstate.y_accel = y_accel_filtered;
+        fstate.z_accel = z_accel_filtered + 9.80665;
+	
 	return 0;
+}
+
+// static int __integrate(){
+//         double accel_vec[3];
+//         double x_vel, y_vel, z_vel;
+//         double X, Y, Z;
+        
+//         rc_filter_t integrator = RC_FILTER_INITIALIZER;
+//         rc_filter_t double_integrator = RC_FILTER_INITIALIZER;
+//         //double z_accel_filtered;
+// 	accel_vec[0] = fstate.x_accel;
+// 	accel_vec[1] = fstate.y_accel;
+// 	accel_vec[2] = fstate.z_accel;
+        
+        
+//         const double dt = 1.0/200.0;
+//         rc_filter_integrator(&integrator, dt);
+//         rc_filter_double_integrator(&double_integrator, dt);
+        
+//         if(kf.step==0){
+// 		//kf.x_est.d[0] = bmp_data.alt_m;
+// // 		rc_filter_prefill_inputs(&acc_lp, accel_vec[2]-9.80665);
+// // 		rc_filter_prefill_outputs(&acc_lp, accel_vec[2]-9.80665);
+// 	rc_filter_prefill_inputs(&integrator, accel_vec[0]);
+// 	rc_filter_prefill_outputs(&integrator, accel_vec[0]);
+// 	rc_filter_prefill_inputs(&double_integrator, accel_vec[0]);
+// 	rc_filter_prefill_outputs(&double_integrator, accel_vec[0]);
+// 	}
+	
+	
+//         x_vel = rc_filter_march(&integrator, fstate.x_accel);
+//         X = rc_filter_march(&double_integrator, fstate.x_accel);
+        
+//         // x_vel = integrator.newest_output;
+//         // X = double_integrator.newest_output;
+        
+//         fstate.x_vel = x_vel;
+//         fstate.x = X;
+        
+//         return 0;
+        
+// }
+
+static int __Kalman_filtering(){
+        // declare variables
+        int counter;
+        rc_kalman_t kf  = RC_KALMAN_INITIALIZER;
+        rc_matrix_t F   = RC_MATRIX_INITIALIZER;
+        rc_matrix_t G   = RC_MATRIX_INITIALIZER;
+        rc_matrix_t H   = RC_MATRIX_INITIALIZER;
+        rc_matrix_t Q   = RC_MATRIX_INITIALIZER;
+        rc_matrix_t R   = RC_MATRIX_INITIALIZER;
+        rc_matrix_t Pi  = RC_MATRIX_INITIALIZER;
+        rc_vector_t u   = RC_VECTOR_INITIALIZER;
+        rc_vector_t y   = RC_VECTOR_INITIALIZER;
+        // allocate appropriate memory for system
+        rc_matrix_zeros(&F, Nx, Nx);
+        rc_matrix_zeros(&G, Nx, Nu);
+        rc_matrix_zeros(&H, Ny, Nx);
+        rc_matrix_zeros(&Q, Nx, Nx);
+        rc_matrix_zeros(&R, Ny, Ny);
+        rc_matrix_zeros(&Pi, Nx, Nx);
+        rc_vector_zeros(&u, Nu);
+        rc_vector_zeros(&y, Ny);
+        // define system
+        F.d[0][0] = 1;
+        F.d[0][1] = DT;
+        F.d[1][0] = 0;
+        F.d[1][1] = 1;
+        G.d[0][0] = 0.5*DT*DT;
+        G.d[0][1] = DT;
+        H.d[0][0] = 1;
+        H.d[0][1] = 0;
+        // covariance matrices
+        Q.d[0][0] = 0.00001;
+        Q.d[1][1] = 0.00001;
+        R.d[0][0] = 1000000.0;
+        // initial P
+        Pi.d[0][0] = 1000.0;
+        Pi.d[1][1] = 1000.0;
+        if(rc_kalman_alloc_lin(&kf,F,G,H,Q,R,Pi)==-1) return -1;
+        
+        // State equations:
+        //  * - x = [position] = [ 1 , dt]x  +  [ 0.5*dt^2 ]u  +  w
+        //  * -     [velocity]   [ 0 ,  1]      [    dt     ]
+        //  * - y = [pos_est]  = [ 1 ]x   +   w
+        //  * -                  [ 0 ]
+        u.d[0] = fstate.x_accel;
+        y.d[0] = fstate.x;
+        if(rc_kalman_update_lin(&kf, u, y)) running=0;
+        fstate.x = kf.x_est.d[0];
+        fstate.x_vel = kf.x_est.d[1];
 }
 /**
  * This is the IMU interrupt function.
+ * 
  */
 void __print_data(void)
 {
@@ -417,6 +452,12 @@ void __print_data(void)
 
 	fprintf(flight_log,"\n");
 	
+	gettimeofday(&now, NULL);
+	double time_in_mill = 
+         (now.tv_sec) * 1000 + (now.tv_usec) / 1000 ; // convert tv_sec & tv_usec to millisecond
+	
+	fprintf(flight_log,"%+5.4f|", time_in_mill/1000);
+	
         fprintf(flight_log,  "%+5.2f |%+5.2f |%+5.2f |",\
 			        fstate.x_accel,\
 				fstate.y_accel,\
@@ -470,6 +511,7 @@ void __print_header(void)
 	// print the header
 	//__reset_colour();
 	// if(logging_enabled){
+	fprintf(flight_log, "|timestamp (s) |");
 	fprintf(flight_log, "acc_x |acc_y|acc_z|");
 	fprintf(flight_log, " roll |pitch| yaw |");
 	fprintf(flight_log, " x_vel|y_vel|z_vel|");
@@ -511,6 +553,35 @@ int main(int argc, char *argv[])
         int c, sample_rate, priority;
         int show_something = 0; // set to 1 when any show data option is given.
         // start with default config and modify based on options
+        rc_filter_t x_double_integrator  = RC_FILTER_INITIALIZER;
+        rc_filter_t y_double_integrator  = RC_FILTER_INITIALIZER;
+        rc_filter_t z_double_integrator  = RC_FILTER_INITIALIZER;
+        
+        rc_filter_t x_integrator  = RC_FILTER_INITIALIZER;
+        rc_filter_t y_integrator  = RC_FILTER_INITIALIZER;
+        rc_filter_t z_integrator  = RC_FILTER_INITIALIZER;
+        // rc_filter_t lp_butter   = RC_FILTER_INITIALIZER;
+        // rc_filter_t mv_avg = RC_FILTER_INITIALIZER;
+        
+        
+        
+        const double dt = 1.0/SAMPLE_RATE;
+        double lp,hp,i,u,lpb,hpb,displacement = 0;
+        
+        double X, Y, Z, x_vel, y_vel, z_vel;
+        
+        rc_filter_double_integrator(&x_double_integrator, dt);
+        rc_filter_double_integrator(&y_double_integrator, dt);
+        rc_filter_double_integrator(&z_double_integrator, dt);
+        
+        rc_filter_integrator(&x_integrator, dt);
+        rc_filter_integrator(&y_integrator, dt);
+        rc_filter_integrator(&z_integrator, dt);
+        
+        
+        // rc_filter_butterworth_lowpass(&lp_butter, 2, dt, 2.0*M_PI/20);
+        // rc_filter_moving_average(&mv_avg, 6, dt);
+
         rc_mpu_config_t conf = rc_mpu_default_config();
         conf.dmp_sample_rate = SAMPLE_RATE;
         conf.i2c_bus = I2C_BUS;
@@ -537,12 +608,32 @@ int main(int argc, char *argv[])
         // write labels for what data will be printed and associate the interrupt
         // function to print data immediately after the header.
         __print_header();
+        
         //if(!silent_mode) rc_mpu_set_dmp_callback(&__transform);
         //now just wait, print_data() will be called by the interrupt
         while(running) {
-                //__estimate_altitude();
         	__transform();
+        	__complement_filtering();
         	__Kalman_filtering();
+        	
+        	//lpb = rc_filter_march(&lp_butter, fstate.x_accel);
+        // 	i  = rc_filter_march(&mv_avg, fstate.x_accel);
+                x_vel = rc_filter_march(&x_integrator, fstate.x_accel);
+        	y_vel = rc_filter_march(&y_integrator, fstate.y_accel);
+        	z_vel = rc_filter_march(&z_integrator, fstate.z_accel - 9.80665);
+        	
+        	X = rc_filter_march(&x_double_integrator, fstate.x_accel);
+        	Y = rc_filter_march(&y_double_integrator, fstate.y_accel);
+        	Z = rc_filter_march(&z_double_integrator, fstate.z_accel - 9.80665);
+        	
+        	fstate.x_vel = x_vel;
+        	fstate.y_vel = y_vel;
+        	fstate.z_vel = z_vel;
+        	
+        	fstate.x = X;
+        	fstate.y = Y;
+        	fstate.z = Z;
+        // 	printf("%8.4f  |", displacement);
         	__print_data();
         	fflush(stdout);
         	rc_usleep(100000);
@@ -550,6 +641,15 @@ int main(int argc, char *argv[])
         	
         // shut things down
         rc_mpu_power_off();
+        // clean all
+        rc_remove_pid_file();   // remove pid file LAST
+        rc_filter_free(&x_integrator);
+        rc_filter_free(&y_integrator);
+        rc_filter_free(&z_integrator);
+        rc_filter_free(&x_double_integrator);
+        rc_filter_free(&y_double_integrator);
+        rc_filter_free(&z_double_integrator);
+        rc_bmp_power_off();
         printf("\n");
         fflush(stdout);
         return 0;
